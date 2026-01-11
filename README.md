@@ -1,223 +1,224 @@
 # funcscope
+
 ## 项目简介
 
-funcscope 是一个 **函数级 / 代码片段级执行耗时采集工具**，面向 **x86 与 ARM V8 平台**，通过源码插桩精确测量执行时间。
+funcscope 是一个 **函数级 / 代码片段级执行耗时采集工具**，面向 **Linux x86_64 与 ARMv8 平台**，通过 **源码插桩** 精确测量执行时间。  
 
-它并非通用 Profiler，而是用于 **量化优化效果与验证性能回归** 的低侵入度量工具。  
+它并非通用 Profiler，而是用于 **量化微优化效果与验证性能回归** 的低侵入度量工具。  
 
-funcscope 在函数入口/出口记录时间差，并写入每函数独立缓冲区，实现 **零锁、零系统调用** 的热路径采集。  
+funcscope 在函数或代码片段的入口 / 退出处记录时间差，并写入每个监测点独立的固定大小缓冲区，实现：
 
-统计逻辑与业务代码解耦，由独立工具周期性读取并计算分布数据。  
+- 零锁  
+- 零原子操作  
+- 零系统调用（热路径）  
 
-与 perf 的采样模型不同，funcscope 提供 **确定性的单次调用耗时数据**。 
- 
-适用于网络代理、协议栈、事件驱动程序等高频性能敏感场景。
+统计与分析由独立 tool 进程完成，被测进程仅负责写入原始耗时数据。  
 
-## 能力边界与限制说明
+与 perf 的采样模型不同，funcscope 提供的是 **确定性的单次调用耗时数据**。  
 
-funcscope 的设计目标是以**极低侵入性**量化函数或代码片段的执行耗时，因此在能力范围上做了明确取舍：
+适用于网络代理、协议栈、事件驱动程序等高频、性能敏感场景。  
+
+---
+
+## 核心 API 宏规范
+
+### 插桩宏
+
+- **FUNCSCOPE_ENTER(idx)**  
+  - 标记函数或代码片段开始  
+  - `idx` 为监测点索引，范围 `0 ~ num_checkpoints-1`  
+  - 内部仅读取 TSC / CNTVCT，耗时极低  
+
+- **FUNCSCOPE_EXIT(idx)**  
+  - 标记函数或代码片段结束  
+  - 将耗时写入对应缓冲区（环形数组）  
+  - 内部仅修改 `write_pos` 与数组内容，**两条 cache line 写入**  
+
+**注意：**
+
+- 必须成对使用  
+- 不支持嵌套或递归  
+- 单次耗时必须 < 1 秒  
+
+---
+
+### 初始化与清理
+
+- **int32_t funcscope_caller_initialize(uint8_t num_checkpoints, int32_t level)**  
+  - 初始化 funcscope 资源  
+  - 每个进程单独初始化  
+  - num_checkpoints: 最大 128  
+  - level: FS_LITE / FS_NORMAL / FS_DEEP / FS_FULL  
+  - 返回 1 表示成功，0 表示失败  
+
+- **int32_t funcscope_caller_cleanup(void)**  
+  - 释放当前进程资源  
+  - 设置退出标志供 tool 感知  
+  - 返回 1 表示成功  
+
+---
+
+### Server Attach 接口
+
+- **int funcscope_server_poll_and_send_fd(void)**  
+  - 非阻塞轮询 Unix Domain Socket  
+  - 向 tool 发送 mmap backing fd  
+  - 返回 1: 成功发送 fd  
+  - 返回 0: 无 tool attach  
+  - 返回 -1: 发生错误（可忽略或记录）  
+
+推荐调用：
+
+```
+for (;;) {
+event_loop_process();
+funcscope_server_poll_and_send_fd();
+}
+```
+
+**注意：**
+
+- 仅在主循环或非热路径调用  
+- 不要在 FUNCSCOPE_ENTER/EXIT 内调用  
+
+---
+
+### 平台时间读取
+
+- x86_64: RDTSC  
+- ARMv8: CNTVCT_EL0  
+- 内部通过 inline 函数直接读取 CPU tick，开销极低  
+
+---
+
+## 使用示例
+
+**初始化：**
+
+```
+uint8_t checkpoints = 64;
+int32_t level = FS_DEEP;
+if (!funcscope_caller_initialize(checkpoints, level)) {
+// 初始化失败处理
+}
+```
+
+**函数 / 代码片段插桩：**
+
+```
+FUNCSCOPE_ENTER(0);
+/* hot path or critical section */
+FUNCSCOPE_EXIT(0);
+```
+
+**主循环中 tool attach：**
+```
+for (;;) {
+event_loop_process();
+funcscope_server_poll_and_send_fd();
+}
+```
+
+**清理资源：**
+
+```
+funcscope_caller_cleanup();
+```
+
+
+---
+
+## 能力边界与限制
 
 ### 支持的场景
 
-- 函数级或代码片段级的执行耗时测量  
-- 高频调用路径中的微优化效果量化  
-- 优化前 / 优化后的耗时对比与性能回归验证  
-- 偶发慢路径（尾部延迟）的分布分析  
-- UDP / 网络代理 / 协议栈 / 事件驱动程序等性能敏感场景  
-- x86（RDTSC）与 ARM V8（CNTVCT）平台
+- 函数级 / 代码片段级执行耗时测量  
+- 高频调用路径微优化验证  
+- 偶发慢路径（尾部延迟）统计  
+- 单线程、单进程写入  
+- Linux x86_64 / ARMv8  
 
 ### 不支持的场景
 
-- **递归函数**  
-  插桩模型基于成对的进入 / 退出记录，递归调用会破坏统计语义。
-
-- **线程调度或线程级分析**  
-  funcscope 不感知线程切换，不用于分析锁竞争、上下文切换等问题。
-
-- **自动热点定位**  
-  该工具不会像 perf 一样自动发现热点函数，需要由开发者明确指定测量边界。
-
-- **跨函数调用栈分析**  
-  funcscope 仅关注单个函数或代码片段的执行耗时，不构建调用栈关系。
-
-### 设计取舍说明
-
-funcscope 有意避免在热路径中引入原子操作、锁或系统调用，  
-以换取 **更低的运行时干扰** 和 **更清晰的统计语义**。  
-因此它更适合作为性能优化过程中的 **量化与验证工具**，而不是全自动性能分析器。
-
-
-## 一、funcscope 是做什么的
-
-funcscope 解决的问题很明确：
-
-> **我已经知道“要看哪段代码”，只想知道它真实跑了多久，并且不想引入重型工具。**
-
-它的核心能力包括：
-
-- 对 **函数整体执行时间** 进行统计
-- 对 **函数内部某一段代码 scope** 进行统计
-- 支持 **高频调用路径**（百万 / 千万级调用）
-- 运行期开销可控，不依赖采样或内核事件
-
-典型使用方式：
-
-```c
-FUNC_SCOPE_ENTER(id);
-/* hot path or critical section */
-FUNC_SCOPE_EXIT(id);
-```
-
-或：
-
-```c
-FUNC_SCOPE_BEGIN(id);
-/* part A */
-FUNC_SCOPE_END(id);
-```
+- 多线程写入  
+- 递归函数  
+- 线程调度 / 上下文切换分析  
+- 自动热点定位  
+- 跨函数调用栈分析  
 
 ---
 
-## 二、funcscope 不是什么（能力边界）
+## 进程与线程模型
 
-funcscope **刻意不做** 以下事情：
-
-- ❌ 不是 profiler（不采样、不统计调用栈）
-- ❌ 不生成火焰图
-- ❌ 不分析 cache miss / branch miss
-- ❌ 不做线程级 / CPU 级归因
-- ❌ 不支持递归函数
-
-如果你的问题是：
-
-- “CPU 时间都花到哪里去了？”
-- “哪个函数最热？”
-
-👉 **请直接使用 perf / bpftrace**，funcscope 不适合。
+- **写入**: 单线程，单进程  
+- **多进程**: 每个子进程需单独初始化  
+- **tool**: 只读，通过 mmap 获取数据  
+- **热路径**: FUNCSCOPE_ENTER / EXIT 完全 O(1)  
 
 ---
 
-## 三、funcscope 适合的场景
+## 性能与内存
 
-funcscope 适合在以下场景中使用：
-
-### 1. 已定位函数后的精确度量
-
-例如：
-
-- perf 已经定位到 `ngx_stream_proxy_process`
-- 你想知道：
-  - 整个函数一次调用真实耗时
-  - 函数内部某个分支 / 拷贝逻辑耗时
-
-funcscope 可以直接在源码中给出**明确边界**。
+- 每个监测点独立缓存行对齐（64B）  
+- 热路径只访问 2 个 cache line  
+- 无锁、无原子操作、无系统调用  
+- mmap 空间固定、可预测  
+- 可选 hugepage 或 4K page 映射  
 
 ---
 
-### 2. 高频路径下的回归验证
+## 提供形式
 
-- 热路径函数被调用 1e7 次 / 秒
-- 改了一行代码
-- 只想确认 **平均耗时是否发生变化**
+- 以 **源码形式提供**  
+- 文件包括：funcscope.h / funcscope.c / tool 示例  
+- 不提供 `.so` 或 `.a`  
 
-funcscope 适合用于：
+设计原因：
 
-- 性能回归检测
-- 热路径微优化验证
+- FUNCSCOPE 宏必须在编译期展开  
+- 保证 inline 汇编 / cacheline 行为  
+- 便于裁剪与优化  
 
----
-
-### 3. 替代零散的 clock_gettime 插桩
-
-相比在代码中散落大量：
-
-```c
-clock_gettime(...);
-```
-
-funcscope：
-
-- 统一接口
-- 统一数据结构
-- 可集中统计与输出
+推荐直接纳入项目源码树使用。  
 
 ---
 
-## 四、不适合使用 funcscope 的场景
+## 与 perf / bpftrace 的关系
 
-以下场景 **明确不建议** 使用 funcscope：
-
-- 想分析整个系统的性能分布
-- 想知道 cache miss 是哪条指令导致的
-- 想做线程调度 / NUMA / TLB 分析
-- 想分析递归调用链
-
-这些问题 **必须使用 perf / bpftrace / VTune 等工具**。
-
----
-
-## 五、与 perf / bpftrace 的关系
-
-funcscope **不是 perf 的替代品**，而是补充。
-
-| 工具 | 擅长 | 不擅长 |
-|----|----|----|
-| perf | 全局热点、cache miss、指令级分析 | 精确源码边界 |
-| bpftrace | 动态追踪、低侵入 | 高频、源码内细粒度 |
-| funcscope | 已知代码位置的精确耗时 | 全局分析 |
+| 工具      | 擅长                             | 不擅长       |
+| --------- | -------------------------------- | ------------ |
+| perf      | 全局热点、cache miss、指令级分析 | 精确源码边界 |
+| bpftrace  | 动态追踪、低侵入                 | 高频路径     |
+| funcscope | 已知代码位置的精确耗时           | 全局分析     |
 
 推荐流程：
 
-1. 使用 perf 定位热点函数
-2. 使用 perf annotate / 源码分析缩小范围
-3. 使用 funcscope **在源码中精确度量关键路径**
+1. 使用 perf 定位热点函数  
+2. 缩小源码范围  
+3. 使用 funcscope 精确度量关键路径  
 
 ---
 
-## 六、核心实现思路（概览）
+# FUNCSCOPE 宏 API 规范表
 
-funcscope 的设计遵循几个明确原则：
+| 宏 / 函数                                           | 参数                                                                                 | 功能说明                                                 | 热路径开销                                    | 注意事项                                                     |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------ |
+| FUNCSCOPE_ENTER(idx)                                | idx: 监测点索引 (0 ~ num_checkpoints-1)                                              | 记录函数或代码片段开始时间                               | 1 条 RDTSC / CNTVCT 指令 + 条件判断           | 必须与 FUNCSCOPE_EXIT 成对使用；不支持递归或嵌套调用         |
+| FUNCSCOPE_EXIT(idx)                                 | idx: 监测点索引 (0 ~ num_checkpoints-1)                                              | 记录函数或代码片段结束时间，并写入环形缓冲区             | 1 条 RDTSC / CNTVCT + 2 次 cacheline 写入     | 热路径访问 2 个 cache line；保证 idx 合法；不支持递归或嵌套  |
+| funcscope_caller_initialize(num_checkpoints, level) | num_checkpoints: uint8_t, 最大 128<br>level: FS_LITE / FS_NORMAL / FS_DEEP / FS_FULL | 初始化 funcscope 资源，mmap 分配缓冲区，初始化 server fd | 非热路径，仅初始化时调用                      | 每个进程单独调用；返回 1 成功，0 失败                        |
+| funcscope_caller_cleanup()                          | 无                                                                                   | 清理 funcscope 资源，设置退出标志，munmap 内存           | 非热路径，仅清理时调用                        | 每个进程调用一次；返回 1 成功                                |
+| funcscope_server_poll_and_send_fd()                 | 无                                                                                   | 非阻塞轮询 Unix Domain Socket，将 mmap fd 发送给 tool    | 非热路径，可放入主循环                        | 仅在非热路径或循环中调用；返回 1 发送成功，0 无连接，-1 出错 |
+| funcscope_rdtsc()                                   | 无                                                                                   | 内部使用，获取 CPU 时钟计数                              | 1 条汇编指令（x86: RDTSC，ARMv8: CNTVCT_EL0） | 不直接使用，FUNCSCOPE_ENTER/EXIT 内部调用                    |
+| funcscope_hugepage_mmap(dir, size)                  | dir: hugepage 挂载路径<br>size: 映射大小                                             | mmap hugepage 文件，返回可用地址                         | 初始化时调用                                  | 非热路径；size 会向上对齐 2MB                                |
+| funcscope_file_mmap_4K(dir, size)                   | dir: tmpfs 或文件目录<br>size: 映射大小                                              | mmap 常规文件，返回可用地址                              | 初始化时调用                                  | 非热路径；size 会向上对齐 4KB                                |
 
-- **时间获取必须足够快**
-  - x86：TSC
-  - ARM V8：高精度单调时钟
 
-- **不在热路径中做统计计算**
-  - 热路径只记录时间差
-  - 统计与聚合在独立阶段完成
 
-- **空间与时间可预测**
-  - 固定大小数组
-  - 不动态扩容
+## 一句话总结
 
-- **避免额外 cache 抖动**
-  - 单写者模型
-  - 批量读取与统计
+funcscope 是一个 **源码级、单线程写、单进程可控、tool 只读的函数耗时度量工具**。  
 
----
+它不回答“哪里慢”，只回答：
 
-## 七、设计约束（必须遵守）
-
-- 单次测量的执行时间 **必须 < 1 秒**
-- 时间差值使用整数存储
-- 每个统计点独立维护数据
-- 不支持递归函数
-- 不保证跨线程一致性
-
----
-
-## 八、支持的平台
-
-- Linux x86_64
-- Linux ARM64
-
----
-
-## 九、总结一句话
-
-> **funcscope 是一个面向“已知代码位置”的源码级耗时度量工具。**
-> 
-> 它不试图回答“哪里慢”，而是回答：
-> 
-> **“这段代码，真实跑了多久。”**
+> 这段代码，真实跑了多久。  
 
