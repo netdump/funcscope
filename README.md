@@ -81,6 +81,144 @@ funcscope_server_poll_and_send_fd();
 - 仅在主循环或非热路径调用  
 - 不要在 FUNCSCOPE_ENTER/EXIT 内调用  
 
+
+
+### FUNCSCOPE Server Poll 宏 API 说明
+
+#### 背景说明
+
+FUNCSCOPE 运行时通过 Unix Domain Socket 支持 tool attach。
+当 tool attach 发生时，主进程需要向 tool 发送 mmap backing fd。
+
+为了避免在业务热路径中引入额外系统调用或阻塞行为，
+FUNCSCOPE 提供了一个**可控频率的非阻塞轮询机制**，
+用于周期性检测是否有 tool attach 请求。
+
+#### API 定义
+
+```c
+#define FUNCSCOPE_SERVER_POLL_EVERY_N(N)
+```
+
+#### 参数说明
+
+| 参数 | 类型       | 说明                                             |
+| ---- | ---------- | ------------------------------------------------ |
+| N    | 编译期常量 | 调用频率控制参数，表示“每 N 次调用触发一次 poll” |
+
+
+**参数约束**
+
++ **N 必须是 2 的幂**
+
+  + 合法示例：2, 4, 8, 16, 64, 1024
+
+  + 非法示例：3, 10, 100
+
+该约束用于使用位运算替代取余运算，避免除法指令。
+
+#### 功能说明
+
+该宏在每次展开调用时：
+
++ 自动维护一个内部静态计数器
+
++ 对计数器进行自增
+
++ 当计数器满足触发条件时，调用：
+```
+funcscope_server_poll_and_send_fd();
+```
+
+该函数内部保证：
+
++ 非阻塞 accept
+
++ 无锁
+
++ 无动态内存分配
+
++ 最多一次 sendmsg 系统调用
+
+#### 热路径性能分析
+**热路径（未触发 poll）**
+
++ 1 次自增
+
++ 1 次按位与
+
++ 1 次条件跳转（高度可预测）
+
+**无系统调用**
+
+**触发 poll 时**
+
++ 1 次非阻塞 accept
+
++ 可能的 1 次 sendmsg
+
++ 极低发生概率（由 N 控制）
+
+#### 计数器语义说明
+
++ 宏内部使用 static unsigned int 作为计数器
+
++ 每个宏展开点拥有独立计数器
+
++ 不同函数、不同源文件之间互不影响
+
+示例：
+
+```
+void loop_a(void)
+{
+    for (;;) {
+        FUNCSCOPE_SERVER_POLL_EVERY_N(1024);
+    }
+}
+
+void loop_b(void)
+{
+    for (;;) {
+        FUNCSCOPE_SERVER_POLL_EVERY_N(1024);
+    }
+}
+
+```
+
+上述两个宏实例的计数器完全独立。
+
+
+#### 使用建议
+
+推荐使用场景：
+
++ 主事件循环
+
++ 网络收包主循环
+
++ epoll / poll / select 外围循环
+
++ 高性能数据处理 pipeline
+
+不推荐使用场景：
+
++ 多线程共享同一个宏展开点
+
++ 需要精确周期（非幂次）的场景
+
+#### 设计取舍说明
+
+选择“宏内部维护计数器”的原因：
+
++ 避免污染业务代码
+
++ 避免要求用户维护 loop counter
+
++ 保证 API 简洁、零侵入
+
++ 最大化热路径性能
+
 ---
 
 ### 平台时间读取
@@ -114,8 +252,15 @@ FUNCSCOPE_EXIT(0);
 **主循环中 tool attach：**
 ```
 for (;;) {
-event_loop_process();
-funcscope_server_poll_and_send_fd();
+  event_loop_process();
+  funcscope_server_poll_and_send_fd();
+}
+
+or
+
+for (;;) {
+  event_loop_process();
+  FUNCSCOPE_SERVER_POLL_EVERY_N(65536);
 }
 ```
 

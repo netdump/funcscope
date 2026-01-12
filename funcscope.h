@@ -199,6 +199,52 @@ int32_t funcscope_caller_initialize(uint8_t num_checkpoints, int32_t level);
 int funcscope_server_poll_and_send_fd(void);
 
 /**
+ * @brief 以固定频率（每 N 次）非阻塞轮询 funcscope tool attach，并在需要时发送 mmap fd
+ *
+ * 该宏用于在业务主循环或高频路径中，低成本地周期性调用
+ * funcscope_server_poll_and_send_fd()，用于支持运行时 tool attach。
+ *
+ * 设计目标：
+ *  - 无锁
+ *  - 无内存分配
+ *  - 非阻塞
+ *  - 热路径开销极低
+ *
+ * 实现说明：
+ *  - 宏内部维护一个 static 计数器 __fs_poll_cnt
+ *  - 每次展开调用时自动自增
+ *  - 仅当 (__fs_poll_cnt & (N - 1)) == 0 时才触发真正的 poll
+ *
+ * 重要约束：
+ *  - N 必须是 2 的幂（例如 8 / 64 / 1024）
+ *  - 这是为了使用按位与 (&) 实现取余判断，避免除法指令
+ *
+ * 使用注意：
+ *  - 每一个宏“展开点”拥有独立的计数器
+ *  - 不同函数 / 不同源文件互不干扰
+ *  - 不适合在多个线程共享同一个展开点
+ *
+ * 示例：
+ *
+ *   for (;;) {
+ *       FUNCSCOPE_SERVER_POLL_EVERY_N(1024);
+ *       do_work();
+ *   }
+ */
+#define IS_POWER_OF_2(x) (((x) & ((x) - 1)) == 0)
+
+#define FUNCSCOPE_SERVER_POLL_EVERY_N(N)          \
+    do                                            \
+    {                                             \
+        static unsigned int __fs_poll_cnt;        \
+        assert(IS_POWER_OF_2(N));                 \
+        if (((__fs_poll_cnt++) & ((N) - 1)) == 0) \
+        {                                         \
+            funcscope_server_poll_and_send_fd();  \
+        }                                         \
+    } while (0)
+
+/**
  * @brief 在被检测的进程中调用该接口清理资源
  */
 int32_t funcscope_caller_cleanup(void);
@@ -240,9 +286,13 @@ static inline uint64_t funcscope_rdtsc(void)
 #error "Unsupported platform"
 #endif
 
-#define FUNCSCOPE_ENTER(idx)                        \
-    uint64_t __fs_start_##idx = 0;                  \
-    __builtin_expect(g_funcscope_rt.initialized, 1) ? (__fs_start_##idx = funcscope_rdtsc()) : 0
+#define FUNCSCOPE_ENTER(idx)                                \
+    do {                                                    \
+        uint64_t __fs_start_##idx = 0;                      \
+        __builtin_expect(g_funcscope_rt.initialized, 1)     \
+            ? (__fs_start_##idx = funcscope_rdtsc()) : 0    \
+    } while(0)
+
 
 #define FUNCSCOPE_EXIT(idx)                                                   \
     do                                                                        \
