@@ -302,7 +302,7 @@ fail:
 
 /*****************************************************************/
 
-#define SERVER_SOCK_FMT "/tmp/funcscope_%d.sock"
+#define SERVER_SOCK_FMT "/tmp/funcscope.%d.sock"
 #define MAX_PENDING_CONN 4
 
 /**
