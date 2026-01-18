@@ -287,11 +287,11 @@ static inline uint64_t funcscope_rdtsc(void)
 #endif
 
 #define FUNCSCOPE_ENTER(idx)                                \
+    uint64_t __fs_start_##idx = 0;                          \
     do {                                                    \
-        uint64_t __fs_start_##idx = 0;                      \
         __builtin_expect(g_funcscope_rt.initialized, 1)     \
-            ? (__fs_start_##idx = funcscope_rdtsc()) : 0    \
-    } while(0)
+            ? (__fs_start_##idx = funcscope_rdtsc()) : 0;   \
+    } while(0);
 
 
 #define FUNCSCOPE_EXIT(idx)                                                   \
