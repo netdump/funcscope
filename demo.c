@@ -74,7 +74,7 @@ __attribute__((noinline)) void task_func(void)
 
     FUNCSCOPE_ENTER(0);
 
-    #if 0
+    #if 1
     uint64_t sum = 0;
 
     for (int r = 0; r < LOOP_CNT; r++)
@@ -109,12 +109,12 @@ int main(void) {
     bind_to_cpu(7);
 
     // 2. 设置实时优先级
-    //set_realtime_priority(80); // 高优先级，SCHED_FIFO
+    set_realtime_priority(80); // 高优先级，SCHED_FIFO
 
     // 3. 设置 nice 值为 -20
-    //set_high_nice(-20);
+    set_high_nice(-20);
 
-    printf("pid: %ld\n", getpid());
+    printf("pid: %d\n", getpid());
 
     funcscope_caller_initialize(1, FS_LITE);
 

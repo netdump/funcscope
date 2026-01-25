@@ -211,7 +211,7 @@ static funcscope_t *mmap_full(int fd) {
 
     printf("st.st_size: %ld; fd: %d\n", st.st_size, fd);
 
-    if (st.st_size < sizeof(funcscope_t))
+    if (st.st_size < (long int)sizeof(funcscope_t))
     {
         fprintf(stderr,
                 "invalid mmap size: %zu\n",
