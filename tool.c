@@ -200,13 +200,38 @@ static int attach_all(target_proc_t *procs, int n)
     return 0;
 }
 
-static funcscope_t *mmap_full(int fd)
-{
-    funcscope_t hdr;
-    pread(fd, &hdr, sizeof(hdr), 0);
+static funcscope_t *mmap_full(int fd) {
+    struct stat st;
 
-    size_t size = hdr.private.space_size;
-    return mmap(NULL, size, PROT_READ, MAP_SHARED, fd, 0);
+    if (fstat(fd, &st) < 0)
+    {
+        perror("fstat mmap fd");
+        return NULL;
+    }
+
+    printf("st.st_size: %ld; fd: %d\n", st.st_size, fd);
+
+    if (st.st_size < sizeof(funcscope_t))
+    {
+        fprintf(stderr,
+                "invalid mmap size: %zu\n",
+                (size_t)st.st_size);
+        return NULL;
+    }
+
+    void *p = mmap(FUNCSCOPE_MMAP_BASE,
+                   st.st_size,
+                   PROT_READ,
+                   MAP_SHARED | MAP_FIXED,
+                   fd,
+                   0);
+    if (p == MAP_FAILED)
+    {
+        perror("mmap full");
+        return NULL;
+    }
+
+    return (funcscope_t *)p;
 }
 
 typedef struct
@@ -305,7 +330,7 @@ int main(int argc, char **argv)
                        st.p50, st.p99, st.stddev, st.iqr);
             }
         }
-        printf("----\n");
+
         if (args.repeat > 0 && ++loop >= args.repeat)
             break;
         usleep(args.interval_ms * 1000);
