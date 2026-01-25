@@ -4,6 +4,7 @@
 #define __FUNCSCOPE_H__
 
 #include <stdint.h>
+#include <assert.h>
 
 /*
 FS_LITE（128 点）轻量级采样
@@ -98,11 +99,17 @@ FS_FULL（1024 点）高密度采样
 /* funcscope 采样密度等级（采样点数量） */
 enum funcscope_level
 {
-    FS_LITE = 128,   /* 轻量级采样，开销极低 */
-    FS_NORMAL = 256, /* 标准采样等级，适合常规使用 */
-    FS_DEEP = 512,   /* 深度采样，用于更细粒度分析 */
-    FS_FULL = 1024,  /* 最大采样密度，适用于低频读取（500ms/1s），对被测路径扰动可忽略 */
+    FS_LITE = 64,   /* 轻量级采样，开销极低 */
+    FS_NORMAL = 128, /* 标准采样等级，适合常规使用 */
+    FS_DEEP = 256,   /* 深度采样，用于更细粒度分析 */
+    FS_FULL = 512,  /* 最大采样密度，适用于低频读取（500ms/1s），对被测路径扰动可忽略 */
 };
+
+/*
+ * funcscope 共享 mmap 固定基址
+ * 位于用户态高地址保留区，极少与 libc / heap / stack 冲突
+ */
+#define FUNCSCOPE_MMAP_BASE ((void *)0x600000000000UL)
 
 #define FUNCSCOPE_CHECK_POINTS 128
 

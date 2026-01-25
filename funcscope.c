@@ -158,8 +158,8 @@ void * funcscope_hugepage_mmap(const char *huge_dir, size_t map_size)
 
     aligned_size = fs_round_up_2mb(map_size);
 
-    /* 自动生成文件名（示例：funcscope_<pid>.map） */
-    snprintf(path, sizeof(path), "%s/funcscope_%d.map", huge_dir, getpid());
+    /* 自动生成文件名（示例：funcscope.<pid>.map） */
+    snprintf(path, sizeof(path), "%s/funcscope.%d.map", huge_dir, getpid());
 
     fd = open(path, O_CREAT | O_RDWR, 0600);
     if (fd < 0)
@@ -177,17 +177,19 @@ void * funcscope_hugepage_mmap(const char *huge_dir, size_t map_size)
         return MAP_FAILED;
     }
 
-    addr = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    addr = mmap(FUNCSCOPE_MMAP_BASE, aligned_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
 
     if (addr == MAP_FAILED)
     {
         perror("mmap failed");
+        close(fd);
+        unlink(path);
         return MAP_FAILED;
     }
 
     g_funcscope_rt.mmap_fd = fd;
 
-    close(fd);
+    //close(fd);
     unlink(path);
 
     /* 清零，避免读取历史内容 */
@@ -253,8 +255,8 @@ void *funcscope_file_mmap_4K(const char *dir, size_t map_size)
 
     pid = getpid();
 
-    /* 自动生成文件名（示例：funcscope_<pid>.map） */
-    snprintf(path, sizeof(path), "%s/funcscope_%d.map", dir, pid);
+    /* 自动生成文件名（示例：funcscope.<pid>.map） */
+    snprintf(path, sizeof(path), "%s/funcscope.%d.map", dir, pid);
 
     /* 确保目录存在（只创建一级，失败可忽略） */
     mkdir(dir, 0755);
@@ -273,7 +275,7 @@ void *funcscope_file_mmap_4K(const char *dir, size_t map_size)
         goto fail;
     }
 
-    addr = mmap(NULL, aligned_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    addr = mmap(FUNCSCOPE_MMAP_BASE, aligned_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
 
     if (addr == MAP_FAILED)
     {
@@ -283,7 +285,7 @@ void *funcscope_file_mmap_4K(const char *dir, size_t map_size)
 
     g_funcscope_rt.mmap_fd = fd;
 
-    close(fd);
+    //close(fd);
     unlink(path);
     //fd = -1;
 
